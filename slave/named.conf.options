@@ -1,0 +1,24 @@
+options {
+    directory "/var/cache/bind";
+
+    listen-on port 53 { any; };
+    listen-on-v6 { none; };
+
+    allow-query { any; };
+    recursion no;
+    allow-recursion { none; };
+    allow-query-cache { none; };
+
+    dnssec-validation auto;
+    auth-nxdomain no;
+    minimal-responses yes;
+    version "not disclosed";
+
+    rate-limit {
+        responses-per-second 5;
+        window 5;
+    };
+
+    pid-file "/var/run/named/named.pid";
+    session-keyfile "/var/run/named/session.key";
+};
