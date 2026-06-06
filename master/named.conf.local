@@ -1,0 +1,15 @@
+zone "internal" {
+    type master;
+    file "/etc/bind/zones/db.internal";
+    allow-update { none; };
+    allow-transfer { none; };
+    notify no;
+};
+
+zone "0.10.10.in-addr.arpa" {
+    type master;
+    file "/etc/bind/zones/db.10.10.0";
+    allow-update { none; };
+    allow-transfer { none; };
+    notify no;
+};

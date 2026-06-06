@@ -1,0 +1,40 @@
+services:
+  dns-master:
+    build:
+      context: ./master
+    container_name: dns-master
+    restart: unless-stopped
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+    volumes:
+      - ./master/named.conf:/etc/bind/named.conf:ro
+      - ./master/named.conf.options:/etc/bind/named.conf.options:ro
+      - ./master/named.conf.local:/etc/bind/named.conf.local:ro
+      - ./master/rndc.key:/etc/bind/rndc.key:ro
+      - ./master/rndc.conf:/etc/bind/rndc.conf:ro
+      - ./master/zones:/etc/bind/zones:ro
+      - ./master/logs:/var/log/bind
+    networks:
+      dns-lab:
+        ipv4_address: 10.10.0.2
+
+  dns-client:
+    build:
+      context: ./master
+    container_name: dns-client
+    command: ["sleep", "infinity"]
+    depends_on:
+      - dns-master
+    dns:
+      - 10.10.0.2
+    networks:
+      dns-lab:
+        ipv4_address: 10.10.0.10
+
+networks:
+  dns-lab:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.10.0.0/24

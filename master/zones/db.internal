@@ -1,0 +1,22 @@
+$TTL 300
+@   IN  SOA ns1.internal. admin.internal. (
+        2026060201 ; serial
+        3600       ; refresh
+        900        ; retry
+        604800     ; expire
+        300        ; negative cache TTL
+)
+
+@       IN  NS      ns1.internal.
+@       IN  NS      ns2.internal.
+@       IN  MX  10  mail.internal.
+@       IN  TXT     "course=dns-project"
+
+ns1     IN  A       10.10.0.2
+ns2     IN  A       10.10.0.3
+web     IN  A       10.10.0.20
+api     IN  A       10.10.0.21
+mail    IN  A       10.10.0.30
+
+web     IN  AAAA    fd00:10:10::20
+www     IN  CNAME   web.internal.
