@@ -1,0 +1,17 @@
+$TTL 300
+@   IN  SOA ns1.internal. admin.internal. (
+        2026060201 ; serial
+        3600       ; refresh
+        900        ; retry
+        604800     ; expire
+        300        ; negative cache TTL
+)
+
+@   IN  NS  ns1.internal.
+@   IN  NS  ns2.internal.
+
+2   IN  PTR ns1.internal.
+3   IN  PTR ns2.internal.
+20  IN  PTR web.internal.
+21  IN  PTR api.internal.
+30  IN  PTR mail.internal.
