@@ -1,0 +1,17 @@
+zone "internal" {
+    type slave;
+    masters { 10.10.0.2; };
+    file "/var/cache/bind/slave-zones/db.internal";
+    masterfile-format text;
+    allow-notify { 10.10.0.2; };
+    allow-transfer { none; };
+};
+
+zone "0.10.10.in-addr.arpa" {
+    type slave;
+    masters { 10.10.0.2; };
+    file "/var/cache/bind/slave-zones/db.10.10.0";
+    masterfile-format text;
+    allow-notify { 10.10.0.2; };
+    allow-transfer { none; };
+};

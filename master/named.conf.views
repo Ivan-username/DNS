@@ -1,0 +1,27 @@
+view "internal-view" {
+    match-clients { trusted_clients; };
+
+    allow-query { any; };
+    recursion yes;
+    allow-recursion { trusted_clients; };
+    allow-query-cache { trusted_clients; };
+
+    include "/etc/bind/named.conf.local";
+};
+
+view "external-view" {
+    match-clients { any; };
+
+    allow-query { any; };
+    recursion no;
+    allow-recursion { none; };
+    allow-query-cache { none; };
+
+    zone "internal" {
+        type master;
+        file "/etc/bind/zones/db.internal.external";
+        allow-update { none; };
+        allow-transfer { none; };
+        notify no;
+    };
+};

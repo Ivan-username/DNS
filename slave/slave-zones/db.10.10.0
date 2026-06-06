@@ -1,0 +1,17 @@
+$ORIGIN .
+$TTL 300	; 5 minutes
+0.10.10.in-addr.arpa	IN SOA	ns1.internal. admin.internal. (
+				2026060401 ; serial
+				3600       ; refresh (1 hour)
+				900        ; retry (15 minutes)
+				604800     ; expire (1 week)
+				300        ; minimum (5 minutes)
+				)
+			NS	ns1.internal.
+			NS	ns2.internal.
+$ORIGIN 0.10.10.in-addr.arpa.
+2			PTR	ns1.internal.
+20			PTR	web.internal.
+21			PTR	api.internal.
+3			PTR	ns2.internal.
+30			PTR	mail.internal.
