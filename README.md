@@ -122,6 +122,7 @@ make check-config
 docker compose exec dns-master named-checkconf /etc/bind/named.conf
 docker compose exec dns-slave named-checkconf /etc/bind/named.conf
 docker compose exec dns-master named-checkzone internal /etc/bind/zones/db.internal
+docker compose exec dns-master named-checkzone internal /etc/bind/zones/db.internal.external
 docker compose exec dns-master named-checkzone 0.10.10.in-addr.arpa /etc/bind/zones/db.10.10.0
 ```
 
