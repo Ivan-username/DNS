@@ -1,69 +1,37 @@
-# Task 03 Doc. Slave DNS, zone transfer, ACL, DNSSEC, Split-Horizon и RRL
+# Task 03 Doc. Slave DNS, security, DNSSEC, Split-Horizon и RRL
 
 ## Краткое введение
 
-Task 03 добавляет отказоустойчивость и безопасность. После Task 02 есть master DNS, который хранит локальные зоны. Task 03 расширяет эту схему: добавляет slave DNS, ограничивает transfer зон, закрывает открытую рекурсию, включает DNSSEC validation, реализует Split-Horizon DNS и настраивает RRL или документирует ограничение реализации.
+Slave DNS, или secondary DNS, получает копии зон с master и отвечает
+авторитативно теми же данными. Это повышает доступность DNS и показывает
+стандартный механизм передачи зон.
 
-Slave DNS, или secondary DNS, хранит копию зоны master-сервера. Если master недоступен или нужно распределить нагрузку, slave может отвечать на DNS-запросы сам. Копирование зоны выполняется через zone transfer, обычно AXFR.
+Безопасность DNS в проекте состоит из нескольких частей: AXFR доступен только
+slave-серверу, рекурсия ограничена ACL, DNSSEC validation проверяет внешние
+ответы, Split-Horizon разделяет внутренние и внешние данные, а RRL ограничивает
+частоту похожих ответов.
 
 ## Почему выбран такой способ
 
-Slave тоже реализуется на BIND9, потому что BIND9 естественно поддерживает роли master и slave, директивы `allow-transfer`, `masters`, `notify`, `also-notify` и одинаковый формат зон.
+Slave также реализован на BIND9, потому что BIND9 напрямую поддерживает
+master/slave, `notify`, AXFR и IXFR. Для Split-Horizon используется механизм
+`view`, поскольку он является стандартным способом BIND9 выбирать зону по
+адресу клиента.
 
-DNSSEC реализуется в базовом варианте validation. Это значит, что сервер проверяет подлинность внешних DNS-ответов при рекурсивных запросах. Подписание локальной зоны `internal` не является обязательным для сдачи, потому что оно добавляет управление ключами и усложняет проект. Если время останется, signing можно добавить как расширение.
+В проекте реализована DNSSEC validation, а не подписание локальной зоны. Это
+закрывает задачу проверки подлинности рекурсивных внешних ответов без
+усложнения лаборатории управлением KSK/ZSK-ключами.
 
-Split-Horizon реализуется через BIND `view`. Это стандартный механизм BIND9, позволяющий вернуть разные ответы для одного и того же имени разным клиентам. Для демонстрации желательно иметь internal client и external client.
+## Slave DNS и transfer зон
 
-RRL нужен для снижения риска DNS Amplification. Если конкретная сборка BIND9 не поддерживает директиву `rate-limit`, это нужно честно зафиксировать в документации и показать, что ограничение проверялось через `named-checkconf`.
+`dns-slave` имеет адрес `10.10.0.3` в сети `dns-lab`. Он получает две зоны с
+master `10.10.0.2`:
 
-## Slave DNS
+- `internal`;
+- `0.10.10.in-addr.arpa`.
 
-Текущее состояние перед Task 03 зависит от выполнения Task 02. Если Task 02 еще не реализована, в репозитории нет `docker-compose.yml`, `master/` и рабочих зон, поэтому сначала нужно создать master DNS. Если Task 02 выполнена, Task 03 расширяет уже существующую архитектуру и добавляет `dns-slave`, security-настройки и Split-Horizon.
-
-Целевая схема после выполнения Task 03:
-
-```text
-dns-master 10.10.0.2  --AXFR/IXFR-->  dns-slave 10.10.0.3
-```
-
-В Docker Compose нужно добавить сервис `dns-slave`:
-
-- статический IP `10.10.0.3`;
-- BIND9 на Alpine Linux;
-- отдельная конфигурация в `slave/`;
-- каталог `slave/slave-zones/` для полученных зон;
-- доступность из сети `dns-lab`.
-
-В `slave/named.conf.local` должны быть зоны:
-
-```text
-zone "internal" {
-    type slave;
-    masters { 10.10.0.2; };
-    file "/var/cache/bind/slave-zones/db.internal";
-};
-
-zone "0.10.10.in-addr.arpa" {
-    type slave;
-    masters { 10.10.0.2; };
-    file "/var/cache/bind/slave-zones/db.10.10.0";
-};
-```
-
-После запуска slave должен получить зоны автоматически и отвечать на те же авторитативные запросы, что и master.
-
-Проверка:
-
-```bash
-docker compose exec dns-client dig @dns-slave web.internal A
-docker compose exec dns-client dig @dns-slave -x 10.10.0.20
-```
-
-## Ограничение zone transfer
-
-AXFR не должен быть открыт для всех клиентов. Иначе любой клиент сможет выгрузить всю зону целиком и увидеть внутренние имена.
-
-На master transfer должен быть разрешен только slave-серверу:
+Полученные файлы хранятся в `slave/slave-zones/`. На master для обеих зон
+настроены:
 
 ```text
 allow-transfer { 10.10.0.3; };
@@ -71,56 +39,45 @@ notify yes;
 also-notify { 10.10.0.3; };
 ```
 
-Проверки:
+Обычному клиенту AXFR запрещен. Проверка:
 
 ```bash
-docker compose exec dns-client dig @dns-slave web.internal A
+docker compose exec dns-slave dig @dns-master internal AXFR
 docker compose exec dns-client dig @dns-master internal AXFR
+docker compose exec dns-client dig @dns-slave web.internal A +short
 ```
 
-Если `dns-client` не должен иметь право AXFR, команда с `dns-client` должна показать отказ. Для позитивной проверки можно выполнить AXFR из контейнера slave или проверить, что slave получил файлы зон и отвечает на записи.
+Первый запрос возвращает зону, второй получает `REFUSED`, slave отвечает
+`10.10.0.20`.
 
 ## ACL и ограничение рекурсии
 
-Открытая рекурсия опасна: чужие клиенты могут использовать сервер как публичный резолвер и участвовать в amplification-атаках. Поэтому рекурсия должна быть доступна только доверенным клиентам.
-
-Базовый ACL:
+Открытый рекурсивный DNS-сервер опасен: его могут использовать посторонние
+клиенты и DNS amplification-атаки. В master определен ACL `trusted_clients`:
 
 ```text
-acl "trusted" {
+acl trusted_clients {
+    127.0.0.1;
     10.10.0.0/24;
-    localhost;
-    localnets;
 };
 ```
 
-Рекомендуемые настройки:
-
-```text
-recursion yes;
-allow-recursion { trusted; };
-allow-query-cache { trusted; };
-```
-
-Проверка из доверенного клиента:
+Во внутреннем view рекурсия и доступ к кэшу разрешены только этому ACL. Во
+внешнем view рекурсия полностью отключена.
 
 ```bash
-docker compose exec dns-client dig @dns-master google.com A
+docker compose exec dns-client dig @dns-master cloudflare.com A
+docker compose exec dns-external-client dig @dns-master cloudflare.com A
 ```
 
-Если добавлен external client из другой сети, нужно проверить, что он не может использовать рекурсию:
-
-```bash
-docker compose exec dns-external-client dig @dns-master google.com A
-```
-
-Ожидаемый результат для недоверенного клиента - отказ или отсутствие рекурсивного ответа.
+Доверенный клиент получает ответ, внешний клиент получает `REFUSED`.
 
 ## DNSSEC validation
 
-DNSSEC защищает от подмены DNS-ответов с помощью цифровых подписей. В этом проекте обязательна DNSSEC validation для рекурсивных запросов.
+DNSSEC добавляет цифровые подписи к DNS-данным. Validation означает проверку
+чужих подписанных ответов, а signing означает подписание собственной зоны.
 
-Минимальная настройка:
+В `master/named.conf.options` включено:
 
 ```text
 dnssec-validation auto;
@@ -130,48 +87,39 @@ dnssec-validation auto;
 
 ```bash
 docker compose exec dns-client dig +dnssec @dns-master cloudflare.com A
+docker compose exec dns-client dig +dnssec @dns-master dnssec-failed.org A
 ```
 
-Что важно объяснить в документации:
+Для `cloudflare.com` ожидается успешный ответ с DNSSEC-данными и обычно флагом
+`ad`. Для намеренно сломанной DNSSEC-зоны `dnssec-failed.org` ожидается
+`SERVFAIL`. Проверка зависит от доступа контейнера к upstream DNS.
 
-- validation и signing - разные вещи;
-- validation проверяет внешние подписанные ответы;
-- signing подписывает собственную зону;
-- локальная зона `internal` может оставаться неподписанной, если это явно описано как принятое ограничение.
+Локальная зона `internal` не подписана. Это принятое ограничение проекта:
+реализована DNSSEC validation для рекурсивных запросов, но не DNSSEC signing
+локальной зоны.
 
 ## Split-Horizon DNS
 
-Split-Horizon DNS возвращает разные ответы в зависимости от клиента. Например, внутренний клиент получает внутренний адрес сервиса, а внешний - публичный или демонстрационный адрес.
+Split-Horizon возвращает разные ответы на одно имя в зависимости от клиента.
+Master подключен к двум сетям и содержит два BIND view:
 
-Пример:
+| View | Клиенты | `web.internal A` | Рекурсия |
+| --- | --- | --- | --- |
+| `internal-view` | `10.10.0.0/24` | `10.10.0.20` | Разрешена по ACL |
+| `external-view` | Остальные | `203.0.113.20` | Запрещена |
 
-| Клиент | Запрос | Ответ |
-| --- | --- | --- |
-| Internal client | `web.internal A` | `10.10.0.20` |
-| External client | `web.internal A` | `203.0.113.20` |
-
-Рекомендуемая реализация:
-
-- `internal-view` для клиентов `10.10.0.0/24`;
-- `external-view` для остальных клиентов;
-- отдельная зона `master/zones/db.internal.external` для внешних ответов.
-
-Важно: views не должны сломать transfer зон на slave. Если slave получает внутреннюю зону, master должен явно разрешать slave доступ к нужному view или использовать отдельные настройки, которые не блокируют AXFR.
-
-Проверки:
+Внешний адрес взят из документационной сети `203.0.113.0/24` и используется
+только для демонстрации.
 
 ```bash
-docker compose exec dns-client dig @dns-master web.internal A
-docker compose exec dns-external-client dig @dns-master web.internal A
+docker compose exec dns-client dig @dns-master web.internal A +short
+docker compose exec dns-external-client dig @dns-master web.internal A +short
 ```
-
-Если отдельная внешняя сеть пока не создана, нужно документировать точную команду или compose-расширение для проверки external view.
 
 ## RRL
 
-RRL, Response Rate Limiting, ограничивает частоту похожих DNS-ответов. Это снижает риск DNS Amplification, когда злоумышленник отправляет много запросов с подмененным source IP и заставляет DNS-сервер отвечать жертве.
-
-Пример настройки:
+RRL, Response Rate Limiting, снижает риск DNS amplification, ограничивая
+частоту похожих ответов. На master и slave настроен учебный лимит:
 
 ```text
 rate-limit {
@@ -180,67 +128,20 @@ rate-limit {
 };
 ```
 
-После добавления RRL обязательно выполнить:
+Поддержка директивы подтверждается успешным `named-checkconf`. При серии
+однотипных запросов события RRL видны в логах master.
 
 ```bash
-docker compose exec dns-master named-checkconf
+docker compose exec dns-master named-checkconf /etc/bind/named.conf
+docker compose logs dns-master
 ```
 
-Если BIND9 в выбранном Alpine-образе не поддерживает `rate-limit`, это не нужно скрывать. В документации следует написать, что поддержка RRL проверена, но конкретная сборка BIND не приняла директиву; тогда ограничение реализации считается документированным.
-
-## Ручные команды проверки
-
-Запуск:
+## Итоговая проверка
 
 ```bash
-docker compose up -d --build
-docker compose ps
+make check-config
+make test
 ```
 
-Проверка конфигурации:
-
-```bash
-docker compose exec dns-master named-checkconf
-docker compose exec dns-slave named-checkconf
-```
-
-Проверка master/slave:
-
-```bash
-docker compose exec dns-client dig @dns-master web.internal A
-docker compose exec dns-client dig @dns-slave web.internal A
-docker compose exec dns-client dig @dns-master -x 10.10.0.20
-docker compose exec dns-client dig @dns-slave -x 10.10.0.20
-```
-
-Проверка рекурсии и DNSSEC:
-
-```bash
-docker compose exec dns-client dig @dns-master google.com A
-docker compose exec dns-client dig +dnssec @dns-master cloudflare.com A
-```
-
-Проверка AXFR:
-
-```bash
-docker compose exec dns-client dig @dns-master internal AXFR
-```
-
-Проверка Split-Horizon:
-
-```bash
-docker compose exec dns-client dig @dns-master web.internal A
-docker compose exec dns-external-client dig @dns-master web.internal A
-```
-
-## Критерии готовности Task 03
-
-- `dns-slave` запускается и отвечает на запросы.
-- Slave получает forward и reverse zones с master.
-- AXFR разрешен только slave-серверу.
-- Рекурсия доступна только trusted-клиентам.
-- DNSSEC validation включена и проверяется через `dig +dnssec`.
-- Split-Horizon возвращает разные ответы для internal и external клиентов или имеет документированный способ проверки.
-- RRL включен или ограничение поддержки RRL документировано.
-- `named-checkconf` проходит на master и slave.
-- Документация объясняет ACL, AXFR, DNSSEC, Split-Horizon и RRL простым языком.
+Эти команды проверяют конфигурацию, зоны, записи master/slave, latency и
+ограничение AXFR.
