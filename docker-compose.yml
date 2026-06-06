@@ -11,6 +11,7 @@ services:
       - ./master/named.conf:/etc/bind/named.conf:ro
       - ./master/named.conf.options:/etc/bind/named.conf.options:ro
       - ./master/named.conf.local:/etc/bind/named.conf.local:ro
+      - ./master/named.conf.views:/etc/bind/named.conf.views:ro
       - ./master/rndc.key:/etc/bind/rndc.key:ro
       - ./master/rndc.conf:/etc/bind/rndc.conf:ro
       - ./master/zones:/etc/bind/zones:ro
@@ -18,19 +19,57 @@ services:
     networks:
       dns-lab:
         ipv4_address: 10.10.0.2
+      dns-external:
+        ipv4_address: 10.20.0.2
+
+  dns-slave:
+    build:
+      context: ./slave
+    container_name: dns-slave
+    restart: unless-stopped
+    depends_on:
+      - dns-master
+    volumes:
+      - ./slave/named.conf:/etc/bind/named.conf:ro
+      - ./slave/named.conf.options:/etc/bind/named.conf.options:ro
+      - ./slave/named.conf.local:/etc/bind/named.conf.local:ro
+      - ./slave/slave-zones:/var/cache/bind/slave-zones
+    networks:
+      dns-lab:
+        ipv4_address: 10.10.0.3
 
   dns-client:
     build:
-      context: ./master
+      context: ./tests
     container_name: dns-client
     command: ["sleep", "infinity"]
     depends_on:
       - dns-master
+      - dns-slave
+    working_dir: /workspace
+    volumes:
+      - ./tests:/workspace/tests:ro
     dns:
       - 10.10.0.2
     networks:
       dns-lab:
         ipv4_address: 10.10.0.10
+
+  dns-external-client:
+    build:
+      context: ./tests
+    container_name: dns-external-client
+    command: ["sleep", "infinity"]
+    depends_on:
+      - dns-master
+    working_dir: /workspace
+    volumes:
+      - ./tests:/workspace/tests:ro
+    dns:
+      - 10.20.0.2
+    networks:
+      dns-external:
+        ipv4_address: 10.20.0.10
 
 networks:
   dns-lab:
@@ -38,3 +77,8 @@ networks:
     ipam:
       config:
         - subnet: 10.10.0.0/24
+  dns-external:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.20.0.0/24

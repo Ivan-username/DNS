@@ -4,117 +4,179 @@
 
 ## Краткое введение
 
-DNS переводит имена вроде `web.internal` в IP-адреса вроде `10.10.0.20`. Master DNS, или primary DNS, хранит исходные файлы зон и является главным источником правды для домена.
+DNS переводит понятные имена, например `web.internal`, в IP-адреса, например
+`10.10.0.20`. В этом проекте BIND9 одновременно показывает две роли DNS:
+авторитативный сервер хранит локальные зоны, а рекурсивный резолвер ищет внешние
+имена только для доверенных клиентов.
 
-Forward zone отвечает за прямые запросы: имя -> IP-адрес. Reverse zone отвечает за обратные запросы: IP-адрес -> имя через PTR-записи. В этом проекте master обслуживает домен `internal` и reverse zone `0.10.10.in-addr.arpa`.
+Инфраструктура включает master и slave DNS, прямую и обратную зоны, ограниченную
+рекурсию, DNSSEC validation, logging, `rndc`, Split-Horizon DNS, RRL и
+автоматические тесты.
 
-Logging через BIND `logging {}` нужен, чтобы видеть DNS-запросы и события сервера. `rndc` нужен для управления BIND9 без пересоздания контейнера: например, для проверки статуса и перезагрузки зон.
+## Почему выбран этот способ
 
-## Почему BIND9 в Docker Compose
+BIND9 выбран потому, что одним продуктом закрывает требования учебного задания:
+зоны, master/slave, AXFR, ACL, DNSSEC validation, `logging {}`, `view`, `rndc` и
+RRL. Docker Compose делает лабораторию воспроизводимой, а Python, `pytest` и
+`dnspython` проверяют DNS-ответы как структурированные данные.
 
-BIND9 выбран потому, что он закрывает требования задания: авторитативные зоны, reverse DNS, рекурсию, ACL, DNSSEC validation, logging, `rndc`, а на следующих этапах zone transfer, Split-Horizon и RRL.
+Unbound не используется в рабочей конфигурации. Он хорошо подходит для роли
+рекурсивного резолвера, но для этой лаборатории BIND9 проще и нагляднее как
+единая технология.
 
-Docker Compose делает лабораторный стенд воспроизводимым: `dns-master` запускает BIND9, а `dns-client` содержит `dig` и `host` для ручных проверок.
+## Итоговое решение
 
-## Реализовано на этом этапе
+`dns-master` хранит исходные файлы зон `internal` и
+`0.10.10.in-addr.arpa`. `dns-slave` получает их с master через AXFR/IXFR и
+отвечает авторитативно. `dns-client` находится в доверенной сети и используется
+для `dig`, рекурсии и Python-тестов. `dns-external-client` находится в отдельной
+сети, не имеет доступа к рекурсии и получает внешний Split-Horizon ответ.
 
-- `dns-master` на BIND9 в Alpine Linux.
-- `dns-client` для проверок.
-- Docker-сеть `dns-lab`: `10.10.0.0/24`.
-- Master DNS: `10.10.0.2`.
-- Forward zone: `internal`.
-- Reverse zone: `0.10.10.in-addr.arpa`.
-- Записи A, AAAA, MX, TXT, CNAME и PTR.
-- DNSSEC validation для рекурсивных запросов.
-- Рекурсивные запросы от доверенной сети через upstream forwarders `1.1.1.1` и `8.8.8.8`.
-- Logging через BIND `logging {}` в `docker compose logs dns-master`.
-- `rndc status` и `rndc reload`.
+## Стек
 
-## Структура
+- BIND9 на Alpine Linux;
+- Docker Compose;
+- `dig`, `host`, `rndc`;
+- Python, `pytest`, `dnspython`;
+- Bash для проверки AXFR.
+
+## Сервисы и адреса
+
+| Сервис | Роль | Сеть и IP |
+| --- | --- | --- |
+| `dns-master` | Master DNS, рекурсия, internal/external views | `10.10.0.2`, `10.20.0.2` |
+| `dns-slave` | Slave DNS для внутренних зон | `10.10.0.3` |
+| `dns-client` | Доверенный клиент и тесты | `10.10.0.10` |
+| `dns-external-client` | Недоверенный клиент для Split-Horizon | `10.20.0.10` |
+
+Основной домен: `internal`. Reverse zone: `0.10.10.in-addr.arpa`.
+
+## Структура репозитория
 
 ```text
-docker-compose.yml
-master/
-├── Dockerfile
-├── named.conf
-├── named.conf.options
-├── named.conf.local
-├── rndc.conf
-├── rndc.key
-├── keys/
-├── logs/
-└── zones/
-    ├── db.internal
-    └── db.10.10.0
-slave/
-tests/
+.
+├── docker-compose.yml
+├── Makefile
+├── master/
+│   ├── named.conf
+│   ├── named.conf.options
+│   ├── named.conf.local
+│   ├── named.conf.views
+│   ├── rndc.conf
+│   └── zones/
+├── slave/
+│   ├── named.conf
+│   ├── named.conf.options
+│   ├── named.conf.local
+│   └── slave-zones/
+├── tests/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── test_records.py
+│   ├── test_latency.py
+│   ├── test_zone_transfer.sh
+│   └── manual-checks.md
+└── docs/
 ```
 
-## Запуск
+## Быстрый старт
+
+Требуются Docker с Compose plugin и свободный порт `53/tcp` и `53/udp` на
+хосте.
 
 ```bash
 docker compose up -d --build
-```
-
-Проверить, что контейнеры запущены:
-
-```bash
 docker compose ps
 ```
 
-## Проверка конфигурации BIND
-
-```bash
-docker compose exec dns-master named-checkconf /etc/bind/named.conf
-```
-
-Проверить forward zone:
-
-```bash
-docker compose exec dns-master named-checkzone internal /etc/bind/zones/db.internal
-```
-
-Проверить reverse zone:
-
-```bash
-docker compose exec dns-master named-checkzone 0.10.10.in-addr.arpa /etc/bind/zones/db.10.10.0
-```
-
-## Проверка DNS-записей
-
-Forward zone:
-
-```bash
-docker compose exec dns-client dig @10.10.0.2 web.internal A +short
-docker compose exec dns-client dig @10.10.0.2 web.internal AAAA +short
-docker compose exec dns-client dig @10.10.0.2 internal MX +short
-docker compose exec dns-client dig @10.10.0.2 internal TXT +short
-docker compose exec dns-client dig @10.10.0.2 www.internal CNAME +short
-```
-
-Reverse zone:
-
-```bash
-docker compose exec dns-client dig @10.10.0.2 -x 10.10.0.20 +short
-```
-
-## Проверка логов
-
-```bash
-docker compose logs dns-master
-```
-
-После DNS-запросов в логах должны появляться события категории `queries`.
-
-## Проверка rndc
-
-```bash
-docker compose exec dns-master rndc -c /etc/bind/rndc.conf status
-docker compose exec dns-master rndc -c /etc/bind/rndc.conf reload
-```
-
-## Остановка
+Остановить лабораторию:
 
 ```bash
 docker compose down
 ```
+
+## Единый запуск тестов
+
+Основной способ проверки проекта:
+
+```bash
+make test
+```
+
+Команда собирает и запускает контейнеры, выполняет `pytest` для записей и
+latency, затем проверяет разрешенный и запрещенный AXFR.
+
+Отдельные проверки:
+
+```bash
+make pytest
+make axfr
+make check-config
+```
+
+## Ручная проверка
+
+Конфигурация и зоны:
+
+```bash
+docker compose exec dns-master named-checkconf /etc/bind/named.conf
+docker compose exec dns-slave named-checkconf /etc/bind/named.conf
+docker compose exec dns-master named-checkzone internal /etc/bind/zones/db.internal
+docker compose exec dns-master named-checkzone 0.10.10.in-addr.arpa /etc/bind/zones/db.10.10.0
+```
+
+Записи master и slave:
+
+```bash
+docker compose exec dns-client dig @dns-master web.internal A +short
+docker compose exec dns-client dig @dns-master web.internal AAAA +short
+docker compose exec dns-client dig @dns-master internal MX +short
+docker compose exec dns-client dig @dns-master internal TXT +short
+docker compose exec dns-client dig @dns-master www.internal CNAME +short
+docker compose exec dns-client dig @dns-master -x 10.10.0.20 +short
+docker compose exec dns-client dig @dns-slave web.internal A +short
+```
+
+Рекурсия, DNSSEC validation и ACL:
+
+```bash
+docker compose exec dns-client dig @dns-master cloudflare.com A
+docker compose exec dns-client dig +dnssec @dns-master cloudflare.com A
+docker compose exec dns-external-client dig @dns-master cloudflare.com A
+```
+
+Split-Horizon:
+
+```bash
+docker compose exec dns-client dig @dns-master web.internal A +short
+docker compose exec dns-external-client dig @dns-master web.internal A +short
+```
+
+Ожидаются разные ответы: `10.10.0.20` и `203.0.113.20`.
+
+Logging и `rndc`:
+
+```bash
+docker compose logs dns-master
+docker compose exec dns-master rndc -c /etc/bind/rndc.conf status
+docker compose exec dns-master rndc -c /etc/bind/rndc.conf reload
+```
+
+## Документация
+
+- [Контекст, основы DNS и архитектура](docs/task-01-doc-context-architecture.md)
+- [Master DNS, зоны, logging и rndc](docs/task-02-doc-infrastructure-master.md)
+- [Slave DNS, security, DNSSEC, Split-Horizon и RRL](docs/task-03-doc-slave-security.md)
+- [Тесты и демо-сценарий](docs/task-04-doc-tests-docs-demo.md)
+- [Краткие ручные проверки](tests/manual-checks.md)
+
+## Известные ограничения
+
+- Локальная зона `internal` не подписана; реализована DNSSEC validation для
+  рекурсивных внешних запросов.
+- Рекурсивные проверки зависят от доступа Docker-контейнера к forwarders
+  `1.1.1.1` и `8.8.8.8`.
+- RRL включен с учебным лимитом `5` похожих ответов в секунду; это не
+  производственный профиль нагрузки.
+- Внешние адреса `203.0.113.0/24` используются только для демонстрации и не
+  маршрутизируются в интернет.

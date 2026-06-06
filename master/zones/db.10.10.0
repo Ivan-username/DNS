@@ -1,6 +1,6 @@
 $TTL 300
 @   IN  SOA ns1.internal. admin.internal. (
-        2026060201 ; serial
+        2026060401 ; serial
         3600       ; refresh
         900        ; retry
         604800     ; expire

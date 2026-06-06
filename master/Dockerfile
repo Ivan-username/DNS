@@ -6,4 +6,4 @@ RUN apk add --no-cache bind bind-tools bash \
 
 EXPOSE 53/tcp 53/udp 953/tcp
 
-CMD ["named", "-g", "-c", "/etc/bind/named.conf", "-u", "named"]
+CMD ["named", "-f", "-c", "/etc/bind/named.conf", "-u", "named"]

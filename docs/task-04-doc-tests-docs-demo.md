@@ -2,252 +2,203 @@
 
 ## Краткое введение
 
-Task 04 делает проект проверяемым и готовым к сдаче. После настройки DNS-инфраструктуры важно доказать, что она работает воспроизводимо: master и slave отвечают, записи имеют ожидаемые значения, reverse DNS работает, latency приемлемый, AXFR ограничен, а документация позволяет запустить и защитить проект без дополнительного объяснения.
-
-Ручные команды `dig` полезны для демонстрации, но автоматические тесты нужны для повторяемой проверки. В этом проекте основной стек тестов - Python, `pytest` и `dnspython`.
+Этот этап делает DNS-инфраструктуру проверяемой и готовой к защите. Ручные
+команды `dig` показывают отдельные свойства сервера, а автоматические тесты
+доказывают, что записи, master/slave и задержка ответа остаются корректными при
+повторном запуске.
 
 ## Почему выбран такой способ
 
-`pytest` выбран потому, что он дает понятные тесты и сообщения об ошибках. `dnspython` выбран потому, что умеет выполнять DNS-запросы и возвращать структурированные DNS-ответы. Это надежнее, чем разбирать текстовый вывод `dig` во всех проверках.
+`pytest` и `dnspython` используются потому, что работают с DNS-ответами как со
+структурированными объектами: тест может проверить тип записи, значение,
+авторитативный флаг и код ответа без разбора форматированного текста.
 
-Bash остается полезен для AXFR и ручных сценариев, потому что zone transfer удобно показать одной командой `dig AXFR`.
+Bash оставлен для AXFR, потому что разрешенный и запрещенный zone transfer
+нагляднее всего показать через `dig`. Docker Compose, `dig`, `rndc` и тесты
+вместе дают короткий воспроизводимый сценарий защиты без отдельной презентации.
 
-Отдельная презентация пока не нужна. Для сдачи достаточно README, документов в `docs/` и демо-сценария в `docs/task-04-doc-tests-docs-demo.md` или отдельном `docs/demo-script.md`, если отдельный файл будет добавлен позже.
+## Реализованное решение
+
+Лаборатория состоит из BIND9 master, BIND9 slave, доверенного тестового клиента
+и внешнего клиента. Master хранит внутреннюю и внешнюю версии зоны `internal`,
+обслуживает рекурсию только для доверенной сети и валидирует DNSSEC внешних
+ответов. Slave получает внутреннюю forward и reverse зоны через разрешенный
+transfer. Split-Horizon возвращает разные адреса `web.internal` внутреннему и
+внешнему клиенту. RRL, logging и `rndc` включены на master. Все основные записи
+и средняя задержка проверяются автоматически.
 
 ## Автоматические тесты
 
-Текущее состояние перед Task 04 зависит от выполнения Task 02 и Task 03. Если DNS-инфраструктура еще не реализована, тесты и демо-сценарий нужно писать как следующий слой поверх будущих `docker-compose.yml`, `master/`, `slave/` и `tests/`. Если master/slave уже созданы, Task 04 финализирует проверяемость и документацию.
+Файлы:
 
-Минимальная структура:
+| Файл | Назначение |
+| --- | --- |
+| `tests/test_records.py` | A, AAAA, MX, TXT, CNAME, PTR, master и slave |
+| `tests/test_latency.py` | Средняя задержка master и slave |
+| `tests/test_zone_transfer.sh` | Разрешенный AXFR, запрещенный AXFR и ответ slave |
+| `tests/requirements.txt` | `pytest` и `dnspython` |
 
-```text
-tests/
-├── requirements.txt
-├── test_records.py
-├── test_latency.py
-├── test_zone_transfer.sh
-└── manual-checks.md
-```
+Latency измеряется по пяти запросам к `web.internal`. Порог по умолчанию равен
+`100 ms`, что достаточно мягко для локальной Docker-сети и при этом позволяет
+обнаружить явную проблему. Параметры можно изменить переменными окружения
+`DNS_LATENCY_SAMPLES` и `DNS_LATENCY_MAX_MS`.
 
-`tests/requirements.txt`:
-
-```text
-pytest
-dnspython
-```
-
-Если тесты запускаются внутри `dns-client`, контейнер должен иметь Python, pip и зависимости. Если зависимости устанавливаются вручную, это нужно описать в README.
-
-## Тесты DNS-записей
-
-`tests/test_records.py` должен проверять:
-
-- `web.internal A -> 10.10.0.20`;
-- `web.internal AAAA -> fd00:10:10::20`;
-- `internal MX -> mail.internal`;
-- `internal TXT -> course=dns-project`;
-- `www.internal CNAME -> web.internal`;
-- reverse lookup `10.10.0.20 -> web.internal`;
-- ответы master;
-- ответы slave.
-
-Тесты должны явно указывать DNS-сервер, к которому обращаются. Это помогает быстро понять, где ошибка: в master, slave, transfer зон или самих записях.
-
-Пример логики теста:
-
-```python
-import dns.resolver
-
-def query(server, name, record_type):
-    resolver = dns.resolver.Resolver(configure=False)
-    resolver.nameservers = [server]
-    return resolver.resolve(name, record_type, lifetime=2)
-```
-
-Рекомендуемые адреса серверов:
-
-- master: `10.10.0.2`;
-- slave: `10.10.0.3`.
-
-## Latency-тесты
-
-`tests/test_latency.py` должен проверять среднее время ответа master и slave.
-
-Рекомендуемый сценарий:
-
-- выполнить несколько запросов к `dns-master`;
-- выполнить несколько запросов к `dns-slave`;
-- измерить среднее время;
-- сравнить с порогом.
-
-Рекомендуемый порог для Docker-сети - `100 ms`. Если среда нестабильная, порог можно сделать мягче, но это нужно объяснить в комментарии или README.
-
-Важно проверять не один запрос, а несколько. Первый запрос может быть медленнее из-за запуска, кеша или сетевой инициализации.
-
-## AXFR-тест
-
-`tests/test_zone_transfer.sh` нужен для проверки zone transfer.
-
-Он должен проверять:
-
-- AXFR работает там, где должен работать;
-- зона содержит ожидаемые записи;
-- неавторизованный AXFR запрещен, если это можно воспроизвести в текущей compose-схеме;
-- скрипт завершается с ненулевым кодом при ошибке.
-
-Пример команд внутри скрипта:
-
-```bash
-dig @dns-master internal AXFR
-dig @dns-slave web.internal A
-```
-
-Если `dns-client` не имеет права выполнять AXFR, скрипт должен проверять отказ или использовать другой способ подтвердить, что slave получил зону.
-
-## Единый запуск тестов
-
-В README должен быть один основной способ запуска тестов. Например:
-
-```bash
-docker compose exec dns-client pytest tests
-docker compose exec dns-client bash tests/test_zone_transfer.sh
-```
-
-Если добавляется `Makefile`, основной сценарий может быть таким:
+Основной запуск:
 
 ```bash
 make test
 ```
 
-В таком случае `make test` должен запускать и Python-тесты, и AXFR-проверку.
+Отдельные части:
 
-## Документация
+```bash
+make pytest
+make axfr
+```
 
-Task 04 должен финализировать документацию так, чтобы проект можно было защитить без устных пояснений автора.
+## Демо-сценарий
 
-Текущий стиль документации в проекте - task-oriented файлы `task-XX-doc-...md`. Поэтому базовые темы можно держать внутри этих файлов, а отдельные тематические документы добавлять только если материал станет слишком большим.
+### 1. Показать структуру проекта
 
-Обязательные документы в текущем стиле:
+```bash
+find . -maxdepth 2 -type f -not -path './.git/*' -not -path './.ai/*' | sort
+```
 
-- `README.md` - быстрый старт, структура, команды запуска, команды проверки, ссылки на docs;
-- `docs/task-01-doc-context-architecture.md` - объяснение DNS с нуля и общая архитектура;
-- `docs/task-02-doc-infrastructure-master.md` - master DNS, zones, logging и `rndc`;
-- `docs/task-03-doc-slave-security.md` - slave DNS, AXFR, ACL, DNSSEC, Split-Horizon и RRL;
-- `docs/task-04-doc-tests-docs-demo.md` - тесты, README и демо-сценарий.
+Объяснить, что `master/` содержит исходные зоны, `slave/` хранит конфигурацию
+secondary-сервера, `tests/` содержит проверки, а `docs/` - документацию.
 
-В начале каждого документа нужно дать краткое введение в тему, затем объяснить, почему выбран текущий способ, и только потом описывать решение и команды.
-
-## README
-
-README должен содержать:
-
-- краткое введение в проект;
-- цель проекта;
-- выбранный стек;
-- почему выбран BIND9;
-- почему используется Docker Compose;
-- список сервисов;
-- таблицу IP-адресов;
-- структуру репозитория;
-- быстрый старт;
-- ручные команды проверки;
-- команды запуска тестов;
-- ссылки на документы;
-- известные ограничения.
-
-README не должен ссылаться на отдельную презентацию, потому что презентация пока не требуется.
-
-## DNS basics в `docs/task-01-doc-context-architecture.md`
-
-Документ нужен для человека, который не знаком с DNS.
-
-Он должен объяснять:
-
-- зачем нужен DNS;
-- что такое домен и зона;
-- что такое A, AAAA, MX, TXT, CNAME, PTR;
-- что такое forward и reverse DNS;
-- что такое авторитативный сервер;
-- что такое рекурсивный сервер;
-- зачем нужны master и slave;
-- как эти понятия используются в проекте.
-
-## BIND9 vs Unbound в документации
-
-Документ должен объяснять:
-
-- зачем сравнивать DNS-серверы;
-- что умеет BIND9;
-- что умеет Unbound;
-- почему в проекте выбран BIND9;
-- почему Unbound пока не реализуется;
-- можно ли использовать BIND9 и Unbound вместе;
-- какие пункты задания закрывает BIND9;
-- какие пункты мог бы закрывать Unbound в более сложной архитектуре.
-
-Вывод должен быть однозначным: для текущего проекта BIND9 является основной технологией, Unbound описывается как альтернатива для рекурсивного DNS.
-
-## Demo script в `docs/task-04-doc-tests-docs-demo.md`
-
-Демо-сценарий нужен для защиты проекта. Он должен быть пошаговым и воспроизводимым.
-
-Рекомендуемый порядок:
-
-1. Показать структуру репозитория.
-2. Запустить `docker compose up -d --build`.
-3. Показать `docker compose ps`.
-4. Проверить master.
-5. Проверить slave.
-6. Проверить forward zone.
-7. Проверить reverse zone.
-8. Проверить AXFR.
-9. Проверить ACL и рекурсию.
-10. Проверить DNSSEC validation.
-11. Показать Split-Horizon.
-12. Показать logging.
-13. Показать `rndc`.
-14. Запустить автоматические тесты.
-15. Кратко объяснить BIND9 vs Unbound.
-
-Для каждого шага лучше указать команду и ожидаемый результат.
-
-## Ручные команды проверки
-
-Запуск:
+### 2. Запустить лабораторию
 
 ```bash
 docker compose up -d --build
 docker compose ps
 ```
 
-Проверка записей:
+Ожидаются четыре запущенных сервиса: `dns-master`, `dns-slave`, `dns-client` и
+`dns-external-client`.
+
+### 3. Проверить конфигурацию BIND и зоны
 
 ```bash
-docker compose exec dns-client dig @dns-master web.internal A
-docker compose exec dns-client dig @dns-master web.internal AAAA
-docker compose exec dns-client dig @dns-master internal MX
-docker compose exec dns-client dig @dns-master internal TXT
-docker compose exec dns-client dig @dns-master www.internal CNAME
-docker compose exec dns-client dig @dns-master -x 10.10.0.20
-docker compose exec dns-client dig @dns-slave web.internal A
+docker compose exec dns-master named-checkconf /etc/bind/named.conf
+docker compose exec dns-slave named-checkconf /etc/bind/named.conf
+docker compose exec dns-master named-checkzone internal /etc/bind/zones/db.internal
+docker compose exec dns-master named-checkzone 0.10.10.in-addr.arpa /etc/bind/zones/db.10.10.0
 ```
 
-Запуск тестов:
+Ожидаемый результат: команды завершаются без ошибок, `named-checkzone`
+показывает `OK`.
+
+### 4. Проверить master и forward zone
 
 ```bash
-docker compose exec dns-client pytest tests
-docker compose exec dns-client bash tests/test_zone_transfer.sh
+docker compose exec dns-client dig @dns-master web.internal A +short
+docker compose exec dns-client dig @dns-master web.internal AAAA +short
+docker compose exec dns-client dig @dns-master internal MX +short
+docker compose exec dns-client dig @dns-master internal TXT +short
+docker compose exec dns-client dig @dns-master www.internal CNAME +short
 ```
 
-## Критерии готовности Task 04
+Ожидаются `10.10.0.20`, `fd00:10:10::20`, `mail.internal.`,
+`"course=dns-project"` и `web.internal.`.
 
-- Есть `tests/requirements.txt`.
-- Есть тесты A, AAAA, MX, TXT, CNAME и PTR.
-- Есть проверки master и slave.
-- Есть latency-тест.
-- Есть AXFR-тест или воспроизводимая ручная AXFR-проверка.
-- Тесты запускаются одной понятной командой или двумя явно описанными командами.
-- README позволяет запустить проект с нуля.
-- README содержит команды ручной проверки и тестов.
-- Документы объясняют DNS, BIND9 vs Unbound и демо-сценарий.
-- Документация не требует отдельной презентации для защиты проекта.
+### 5. Проверить reverse zone
+
+```bash
+docker compose exec dns-client dig @dns-master -x 10.10.0.20 +short
+```
+
+Ожидаемый ответ: `web.internal.`.
+
+### 6. Проверить slave
+
+```bash
+docker compose exec dns-client dig @dns-slave web.internal A +short
+docker compose exec dns-client dig @dns-slave -x 10.10.0.20 +short
+```
+
+Slave должен вернуть те же внутренние значения, что и master.
+
+### 7. Проверить zone transfer
+
+```bash
+docker compose exec dns-slave dig @dns-master internal AXFR
+docker compose exec dns-client dig @dns-master internal AXFR
+```
+
+Первый запрос разрешен, потому что его source IP равен `10.10.0.3`. Второй
+запрос должен получить `REFUSED`, потому что обычному клиенту запрещено
+скачивать всю зону.
+
+### 8. Проверить ACL и рекурсию
+
+```bash
+docker compose exec dns-client dig @dns-master cloudflare.com A
+docker compose exec dns-external-client dig @dns-master cloudflare.com A
+```
+
+Доверенный клиент получает рекурсивный ответ. Внешний клиент получает отказ,
+потому что external view работает без рекурсии.
+
+### 9. Проверить DNSSEC validation
+
+```bash
+docker compose exec dns-client dig +dnssec @dns-master cloudflare.com A
+docker compose exec dns-client dig +dnssec @dns-master dnssec-failed.org A
+```
+
+Для корректно подписанного домена ожидается успешный ответ, обычно с флагом
+`ad`. Для домена с некорректной DNSSEC-подписью ожидается `SERVFAIL`. Эта
+проверка зависит от доступа контейнера к upstream DNS.
+
+### 10. Показать Split-Horizon DNS
+
+```bash
+docker compose exec dns-client dig @dns-master web.internal A +short
+docker compose exec dns-external-client dig @dns-master web.internal A +short
+```
+
+Внутренний клиент получает `10.10.0.20`, внешний - `203.0.113.20`.
+
+### 11. Показать logging
+
+```bash
+docker compose logs dns-master
+```
+
+После предыдущих запросов в выводе видны сообщения категории `queries`.
+
+### 12. Показать rndc
+
+```bash
+docker compose exec dns-master rndc -c /etc/bind/rndc.conf status
+docker compose exec dns-master rndc -c /etc/bind/rndc.conf reload
+```
+
+`rndc` показывает состояние BIND9 и перезагружает конфигурацию без пересоздания
+контейнера.
+
+### 13. Запустить автоматические тесты
+
+```bash
+make test
+```
+
+Ожидается успешное завершение `pytest` и сообщение `AXFR checks passed.`.
+
+### 14. Кратко объяснить BIND9 и Unbound
+
+BIND9 выбран как единая технология для авторитативных зон, master/slave,
+рекурсии, views, `rndc` и RRL. Unbound мог бы использоваться отдельно как
+рекурсивный DNS-резолвер с DNSSEC validation, но в текущем проекте он не нужен.
+
+## Что доказывает демонстрация
+
+- master и slave отвечают авторитативно;
+- forward и reverse зоны содержат ожидаемые записи;
+- zone transfer разрешен только slave-серверу;
+- рекурсия ограничена доверенной сетью;
+- DNSSEC validation включена;
+- Split-Horizon возвращает разные ответы;
+- logging, `rndc` и RRL присутствуют в конфигурации;
+- тесты запускаются одной командой.

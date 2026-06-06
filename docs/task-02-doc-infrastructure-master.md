@@ -2,226 +2,115 @@
 
 ## Краткое введение
 
-Task 02 создает базовую инфраструктуру проекта: Docker Compose, master DNS на BIND9, forward zone, reverse zone, logging и `rndc`. После этой задачи проект должен уметь запускать master-сервер и отвечать на основные DNS-запросы по локальному домену `internal`.
+Master DNS, или primary DNS, хранит исходные файлы зон и является главным
+источником данных для локального домена. В этой лаборатории master отвечает за
+домен `internal`, прямые записи имен и обратные PTR-записи для сети
+`10.10.0.0/24`.
 
-Master DNS, или primary DNS, хранит исходные файлы зон. В этой лаборатории он отвечает за домен `internal`, прямые записи вроде `web.internal A 10.10.0.20` и обратные PTR-записи для адресов из сети `10.10.0.0/24`.
+Forward zone переводит имя в адрес, например `web.internal -> 10.10.0.20`.
+Reverse zone выполняет обратную операцию:
+`10.10.0.20 -> web.internal`.
 
 ## Почему выбран такой способ
 
-BIND9 выбран для master DNS, потому что он является полноценным авторитативным DNS-сервером и поддерживает все нужные механизмы: зоны, reverse DNS, logging, `rndc`, ACL, DNSSEC и transfer зон. В Task 02 реализуется фундамент, на который затем опираются security и slave-настройки из Task 03.
+BIND9 выбран как master DNS, потому что поддерживает авторитативные зоны,
+logging, `rndc`, ACL, DNSSEC, transfer зон и Split-Horizon в одном продукте.
+Docker Compose делает запуск воспроизводимым, а явные текстовые файлы зон легко
+читать, проверять и показывать на защите.
 
-Docker Compose используется для воспроизводимости. Проверяющий должен иметь возможность выполнить одну команду и получить одинаковую лабораторную среду: master DNS и клиентский контейнер для `dig`, `host` и будущих Python-тестов.
+Logging настроен через встроенный блок BIND `logging {}`, потому что это
+отдельное требование задания. `rndc` используется для управления работающим
+сервером без пересоздания контейнера.
 
-Файлы зон хранятся явно в репозитории. Это проще для учебного проекта: записи можно открыть, прочитать, проверить через `named-checkzone` и объяснить на защите.
+## Реализованное решение
 
-## Что реализует задача
+Сервис `dns-master` собирается из `master/Dockerfile`, использует Alpine Linux и
+BIND9, слушает DNS на TCP/UDP порту `53` и подключен к двум сетям:
 
-Текущее состояние перед Task 02: DNS-сервисы еще не созданы. В репозитории уже есть `AGENTS.md`, документы в `docs/`, пустой `src/` и процессуальные материалы в `.ai/`. Task 02 должна стать первым практическим шагом, который добавит рабочую Docker/BIND-часть в корень проекта.
+| Интерфейс | IP | Назначение |
+| --- | --- | --- |
+| `dns-lab` | `10.10.0.2` | Внутренние клиенты, slave и рекурсия |
+| `dns-external` | `10.20.0.2` | Внешний Split-Horizon view |
 
-В результате Task 02 должны появиться:
+Основные файлы:
 
-- `docker-compose.yml` с сервисами `dns-master` и `dns-client`;
-- `master/Dockerfile` на Alpine Linux с BIND9 и утилитами проверки;
-- главный конфиг BIND9 `master/named.conf`;
-- настройки сервера в `master/named.conf.options`;
-- подключение зон в `master/named.conf.local`;
-- forward zone `master/zones/db.internal`;
-- reverse zone `master/zones/db.10.10.0`;
-- logging через BIND `logging {}`;
-- `rndc` для управления сервером без полного перезапуска;
-- команды запуска и проверки в README или документации.
+| Файл | Назначение |
+| --- | --- |
+| `master/named.conf` | Главный конфиг, controls и logging |
+| `master/named.conf.options` | ACL, forwarders, DNSSEC validation и RRL |
+| `master/named.conf.views` | Internal и external views |
+| `master/named.conf.local` | Внутренние master-зоны |
+| `master/rndc.conf`, `master/rndc.key` | Управление через `rndc` |
+| `master/zones/db.internal` | Внутренняя forward zone |
+| `master/zones/db.internal.external` | Внешняя версия forward zone |
+| `master/zones/db.10.10.0` | Reverse zone |
 
-После Task 02 текущая архитектура репозитория должна измениться так: в корне появятся `docker-compose.yml`, `README.md`, каталог `master/` с конфигурацией BIND9 и каталог `tests/` или клиентская часть, если она нужна для проверок. `slave/` может быть создан как пустая заготовка, но полноценный slave DNS реализуется в Task 03.
+## Forward zone
 
-## Docker Compose
+Зона `internal` содержит записи:
 
-Целевая схема после выполнения Task 02:
+| Имя | Тип | Значение |
+| --- | --- | --- |
+| `web.internal` | `A` | `10.10.0.20` |
+| `web.internal` | `AAAA` | `fd00:10:10::20` |
+| `api.internal` | `A` | `10.10.0.21` |
+| `mail.internal` | `A` | `10.10.0.30` |
+| `internal` | `MX` | `10 mail.internal` |
+| `internal` | `TXT` | `course=dns-project` |
+| `www.internal` | `CNAME` | `web.internal` |
 
-```text
-dns-lab network: 10.10.0.0/24
-
-dns-client  ->  dns-master
-               10.10.0.2
-```
-
-Требования к `dns-master`:
-
-- статический IP `10.10.0.2`;
-- BIND9 запускается в foreground;
-- порт `53/udp` и `53/tcp` доступен для DNS-запросов;
-- конфигурация и зоны подключены как volume или копируются в образ;
-- каталог логов доступен для просмотра.
-
-Требования к `dns-client`:
-
-- находится в той же Docker-сети;
-- имеет утилиты `dig` и `host`;
-- позднее может запускать Python-тесты.
-
-Перед запуском полезно проверить Compose-файл:
-
-```bash
-docker compose config
-```
-
-## Конфигурация BIND9 master
-
-Рекомендуемое разделение конфигов:
-
-- `named.conf` - главный файл, который подключает остальные части;
-- `named.conf.options` - общие настройки BIND9;
-- `named.conf.local` - локальные зоны;
-- `rndc.conf` и ключ `rndc` - управление сервером;
-- `zones/db.internal` - forward zone;
-- `zones/db.10.10.0` - reverse zone.
-
-Минимальные настройки `options`:
-
-```text
-options {
-    directory "/var/cache/bind";
-    listen-on port 53 { any; };
-    listen-on-v6 { none; };
-    dnssec-validation auto;
-};
-```
-
-ACL для рекурсии можно подготовить уже здесь или оставить для Task 03. Если настройка временная, это должно быть явно отмечено комментарием в конфиге и документации.
-
-## Forward zone `internal`
-
-Forward zone переводит имена в IP-адреса. Для проекта нужна зона `internal`.
-
-Минимальные записи:
-
-```text
-internal.       SOA ns1.internal. admin.internal.
-internal.       NS  ns1.internal.
-internal.       NS  ns2.internal.
-ns1             A   10.10.0.2
-ns2             A   10.10.0.3
-web             A   10.10.0.20
-api             A   10.10.0.21
-mail            A   10.10.0.30
-web             AAAA fd00:10:10::20
-internal.       MX  10 mail.internal.
-internal.       TXT "course=dns-project"
-www             CNAME web.internal.
-```
-
-В зоне должен быть корректный SOA serial. При каждом изменении зоны serial нужно увеличивать, иначе slave DNS из Task 03 может не забрать обновления.
-
-Проверка зоны:
+Проверка:
 
 ```bash
 docker compose exec dns-master named-checkzone internal /etc/bind/zones/db.internal
+docker compose exec dns-client dig @dns-master web.internal A +short
+docker compose exec dns-client dig @dns-master web.internal AAAA +short
+docker compose exec dns-client dig @dns-master internal MX +short
+docker compose exec dns-client dig @dns-master internal TXT +short
+docker compose exec dns-client dig @dns-master www.internal CNAME +short
 ```
 
-## Reverse zone `0.10.10.in-addr.arpa`
+## Reverse zone
 
-Reverse zone переводит IP-адреса обратно в имена. Для сети `10.10.0.0/24` используется зона `0.10.10.in-addr.arpa`.
+Зона `0.10.10.in-addr.arpa` содержит PTR-записи для `ns1`, `ns2`, `web`,
+`api` и `mail`.
 
-Минимальные PTR-записи:
-
-```text
-2   PTR ns1.internal.
-3   PTR ns2.internal.
-20  PTR web.internal.
-21  PTR api.internal.
-30  PTR mail.internal.
-```
-
-Проверка зоны:
+Проверка:
 
 ```bash
 docker compose exec dns-master named-checkzone 0.10.10.in-addr.arpa /etc/bind/zones/db.10.10.0
+docker compose exec dns-client dig @dns-master -x 10.10.0.20 +short
 ```
 
-Ручная проверка reverse lookup:
-
-```bash
-docker compose exec dns-client dig @dns-master -x 10.10.0.20
-```
+Ожидаемый PTR-ответ: `web.internal.`.
 
 ## Logging
 
-Logging нужен, чтобы показать, что BIND9 реально получает и обрабатывает запросы. Это отдельный пункт задания, поэтому нужно использовать именно BIND `logging {}`.
-
-Минимально стоит настроить каналы:
-
-- `queries` для DNS-запросов;
-- `security` для событий безопасности;
-- `default` для общих сообщений.
-
-Проверка логов:
+В `master/named.conf` настроены каналы и категории `default`, `queries` и
+`security`. Вывод направляется в stderr контейнера, поэтому запросы и события
+безопасности видны через Docker logs.
 
 ```bash
+docker compose exec dns-client dig @dns-master web.internal A
 docker compose logs dns-master
-```
-
-или, если логи пишутся в файл:
-
-```bash
-docker compose exec dns-master tail -f /var/log/bind/queries.log
 ```
 
 ## rndc
 
-`rndc` позволяет управлять BIND9 без полного перезапуска контейнера. Для защиты используется ключ, который должен быть известен `named` и клиенту `rndc`.
-
-Минимальные проверки:
+`rndc` отправляет аутентифицированные управляющие команды работающему BIND9.
+Master принимает их на `127.0.0.1:953` с ключом `rndc-key`.
 
 ```bash
-docker compose exec dns-master rndc status
-docker compose exec dns-master rndc reload
+docker compose exec dns-master rndc -c /etc/bind/rndc.conf status
+docker compose exec dns-master rndc -c /etc/bind/rndc.conf reload
 ```
 
-Если ключ генерируется внутри контейнера, команду генерации нужно описать в README или документации. Важно не путать `rndc reload` и перезапуск контейнера: `rndc reload` перечитывает конфигурацию или зоны средствами самого BIND9.
-
-## Ручные команды проверки
-
-Запуск:
+## Проверка конфигурации
 
 ```bash
 docker compose up -d --build
-docker compose ps
+docker compose exec dns-master named-checkconf /etc/bind/named.conf
+make check-config
 ```
 
-Проверка конфигурации:
-
-```bash
-docker compose exec dns-master named-checkconf
-docker compose exec dns-master named-checkzone internal /etc/bind/zones/db.internal
-docker compose exec dns-master named-checkzone 0.10.10.in-addr.arpa /etc/bind/zones/db.10.10.0
-```
-
-Проверка записей:
-
-```bash
-docker compose exec dns-client dig @dns-master web.internal A
-docker compose exec dns-client dig @dns-master web.internal AAAA
-docker compose exec dns-client dig @dns-master internal MX
-docker compose exec dns-client dig @dns-master internal TXT
-docker compose exec dns-client dig @dns-master www.internal CNAME
-docker compose exec dns-client dig @dns-master -x 10.10.0.20
-```
-
-Проверка logging и `rndc`:
-
-```bash
-docker compose logs dns-master
-docker compose exec dns-master rndc status
-docker compose exec dns-master rndc reload
-```
-
-## Критерии готовности Task 02
-
-- `docker compose up -d --build` поднимает `dns-master` и `dns-client`.
-- `docker compose config` проходит без ошибок.
-- `named-checkconf` проходит без ошибок.
-- Forward zone `internal` проходит `named-checkzone`.
-- Reverse zone `0.10.10.in-addr.arpa` проходит `named-checkzone`.
-- Master отвечает на A, AAAA, MX, TXT, CNAME и PTR.
-- Logging показывает DNS-запросы.
-- `rndc status` и `rndc reload` работают.
-- В README или docs есть команды запуска и ручной проверки.
+`make check-config` также проверяет slave-конфигурацию и все файлы зон.
